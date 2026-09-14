@@ -273,6 +273,36 @@ type ManualKnowledgePayload struct {
 	ProcessConfig *KnowledgeProcessOverrides `json:"process_config,omitempty"`
 }
 
+// PreChunkedKnowledgePayload creates one Knowledge from chunks that were
+// already split by an upstream system. The service skips DocReader/Chunker and
+// feeds IndexContent directly into the existing chunk persistence and indexing
+// pipeline.
+type PreChunkedKnowledgePayload struct {
+	SourceDocumentID string            `json:"source_document_id"`
+	Title            string            `json:"title"`
+	Chunks           []PreChunkedChunk `json:"chunks"`
+	TagIDs           []string          `json:"tag_ids"`
+	CustomMetadata   map[string]any    `json:"custom_metadata"`
+	Channel          string            `json:"channel"`
+}
+
+type PreChunkedChunk struct {
+	SourceChunkID string `json:"source_chunk_id"`
+	ChunkIndex    int    `json:"chunk_index"`
+	Content       string `json:"content"`
+	IndexContent  string `json:"index_content"`
+}
+
+type PreChunkedKnowledgeResult struct {
+	KnowledgeID string                   `json:"knowledge_id"`
+	Chunks      []PreChunkedChunkMapping `json:"chunks"`
+}
+
+type PreChunkedChunkMapping struct {
+	SourceChunkID string `json:"source_chunk_id"`
+	ChunkID       string `json:"chunk_id"`
+}
+
 // KnowledgeSearchScope defines a (tenant_id, knowledge_base_id) scope for knowledge search (e.g. own KBs + shared KBs).
 type KnowledgeSearchScope struct {
 	TenantID uint64

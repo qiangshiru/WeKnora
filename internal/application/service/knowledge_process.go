@@ -190,6 +190,26 @@ func (s *knowledgeService) processDocumentFromPassage(ctx context.Context,
 	s.processChunks(ctx, kb, knowledge, chunks, opts)
 }
 
+// processPreChunkedKnowledge sends already-split chunks directly to the
+// persistence and embedding pipeline. No splitter, overlap, parent-child mode,
+// generated questions, summaries, graph extraction, or other post-processing
+// is allowed on this path.
+func (s *knowledgeService) processPreChunkedKnowledge(
+	ctx context.Context,
+	kb *types.KnowledgeBase,
+	knowledge *types.Knowledge,
+	chunks []types.ParsedChunk,
+) {
+	knowledge.ParseStatus = types.ParseStatusProcessing
+	knowledge.UpdatedAt = time.Now()
+	if err := s.repo.UpdateKnowledge(ctx, knowledge); err != nil {
+		knowledge.ParseStatus = types.ParseStatusFailed
+		knowledge.ErrorMessage = err.Error()
+		return
+	}
+	s.processChunks(ctx, kb, knowledge, chunks, ProcessChunksOptions{SkipPostProcess: true})
+}
+
 // ProcessChunksOptions contains options for processing chunks
 type ProcessChunksOptions struct {
 	EnableQuestionGeneration bool
@@ -201,6 +221,9 @@ type ProcessChunksOptions struct {
 	// child's ParentIndex references an entry in this slice.
 	ParentChunks []types.ParsedParentChunk
 	Metadata     map[string]string
+	// SkipPostProcess is reserved for pre-chunked ingestion. It completes the
+	// knowledge immediately after indexing and prevents auxiliary chunks.
+	SkipPostProcess bool
 }
 
 // finalizeIndexedKnowledgeState makes a document retrievable as soon as chunks
@@ -688,13 +711,22 @@ func (s *knowledgeService) processChunks(ctx context.Context,
 		pendingMultimodal || pendingPDFMultimodal,
 		now,
 	)
+	if options.SkipPostProcess {
+		knowledge.ParseStatus = types.ParseStatusCompleted
+		knowledge.SummaryStatus = types.SummaryStatusNone
+		knowledge.PendingSubtasksCount = 0
+		knowledge.ErrorMessage = ""
+	}
 
 	if err := s.repo.UpdateKnowledge(ctx, knowledge); err != nil {
 		logger.GetLogger(ctx).WithField("error", err).Errorf("processChunks update knowledge failed")
 	}
 
 	// Enqueue multimodal tasks for images (async, non-blocking)
-	if options.EnableMultimodel && len(options.StoredImages) > 0 {
+	if options.SkipPostProcess {
+		s.skipStage(ctx, knowledge.ID, types.StageMultimodal, "skipped")
+		s.skipStage(ctx, knowledge.ID, types.StagePostProcess, "skipped")
+	} else if options.EnableMultimodel && len(options.StoredImages) > 0 {
 		s.beginStage(ctx, knowledge.ID, types.StageMultimodal, types.JSONMap{
 			"image_count":    len(options.StoredImages),
 			"enable_ocr":     true,

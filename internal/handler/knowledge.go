@@ -543,6 +543,59 @@ func (h *KnowledgeHandler) CreateManualKnowledge(c *gin.Context) {
 	})
 }
 
+// CreatePreChunkedKnowledge godoc
+// @Summary      写入预切分知识块
+// @Description  将一个上游已完成切分的文本块直接持久化并建立索引，不执行任何再次切分或内容增强
+// @Tags         知识管理
+// @Accept       json
+// @Produce      json
+// @Param        id       path      string                           true  "知识库ID"
+// @Param        request  body      types.PreChunkedKnowledgePayload true  "预切分文本块"
+// @Success      201      {object}  map[string]interface{}           "创建结果"
+// @Success      200      {object}  map[string]interface{}           "幂等命中已有记录"
+// @Failure      400      {object}  errors.AppError                  "请求参数错误"
+// @Security     Bearer
+// @Security     ApiKeyAuth
+// @Router       /knowledge-bases/{id}/knowledge/pre-chunked [post]
+func (h *KnowledgeHandler) CreatePreChunkedKnowledge(c *gin.Context) {
+	ctx := c.Request.Context()
+	_, kbID, effectiveTenantID, permission, err := h.validateKnowledgeBaseAccess(c)
+	if err != nil {
+		c.Error(err)
+		return
+	}
+	ctx = types.WithExecutionTenant(c.Request.Context(), effectiveTenantID)
+	if permission != types.OrgRoleAdmin && permission != types.OrgRoleEditor {
+		c.Error(errors.NewForbiddenError("No permission to create knowledge"))
+		return
+	}
+
+	var req types.PreChunkedKnowledgePayload
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.Error(errors.NewBadRequestError(err.Error()))
+		return
+	}
+	result, created, err := h.kgService.CreatePreChunkedKnowledge(ctx, kbID, &req)
+	if err != nil {
+		if appErr, ok := errors.IsAppError(err); ok {
+			c.Error(appErr)
+			return
+		}
+		logger.ErrorWithFields(ctx, err, map[string]interface{}{"kb_id": kbID})
+		c.Error(errors.NewInternalServerError(err.Error()))
+		return
+	}
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+	c.JSON(status, gin.H{
+		"success": true,
+		"data":    result,
+		"created": created,
+	})
+}
+
 // GetKnowledge godoc
 // @Summary      获取知识详情
 // @Description  根据ID获取知识条目详情
