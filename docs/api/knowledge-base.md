@@ -419,6 +419,7 @@ curl --location --request PUT 'http://localhost:8080/api/v1/knowledge-bases/kb-0
 | only_recommended         | boolean  | 否   | 仅返回标记为推荐的内容                                           |
 | knowledge_base_ids       | string[] | 否   | 跨知识库召回（需共享相同 embedding 模型），优先级高于路径中的 `:id` |
 | skip_context_enrichment  | boolean  | 否   | 跳过父子片段/相邻片段的上下文补全（chat 流程使用）               |
+| chunk_metadata_filter    | object   | 否   | PostgreSQL chunk metadata 强过滤；所有字段按 JSONB 包含关系 AND 匹配，传入时自动跳过上下文扩展 |
 
 **请求**:
 
@@ -429,9 +430,17 @@ curl --location --request POST 'http://localhost:8080/api/v1/knowledge-bases/kb-
 --data '{
     "query_text": "如何使用知识库",
     "vector_threshold": 0.5,
-    "match_count": 10
+    "match_count": 10,
+    "chunk_metadata_filter": {
+        "分类": "规则",
+        "is_body": true
+    }
 }'
 ```
+
+`chunk_metadata_filter` 通过 `public.chunks.id = public.embeddings.chunk_id`
+关联，在召回 TopK 之前应用 `chunks.metadata @> <filter>::jsonb`。它不会修改或复制
+现有表字段；JSON 类型必须一致，例如布尔值 `true` 不等于字符串 `"true"`。
 
 **响应**:
 

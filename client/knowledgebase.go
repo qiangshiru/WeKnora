@@ -397,14 +397,18 @@ func (c *Client) ClearKnowledgeBaseContents(ctx context.Context, knowledgeBaseID
 	return &response.Data, nil
 }
 
-// SearchParams represents the search parameters for hybrid search
+// ChunkMetadataFilter contains exact chunk metadata constraints for hybrid search.
+type ChunkMetadataFilter map[string]any
+
+// SearchParams represents the search parameters for hybrid search.
 type SearchParams struct {
-	QueryText            string  `json:"query_text"`
-	VectorThreshold      float64 `json:"vector_threshold"`
-	KeywordThreshold     float64 `json:"keyword_threshold"`
-	MatchCount           int     `json:"match_count"`
-	DisableKeywordsMatch bool    `json:"disable_keywords_match"`
-	DisableVectorMatch   bool    `json:"disable_vector_match"`
+	QueryText            string              `json:"query_text"`
+	VectorThreshold      float64             `json:"vector_threshold"`
+	KeywordThreshold     float64             `json:"keyword_threshold"`
+	MatchCount           int                 `json:"match_count"`
+	DisableKeywordsMatch bool                `json:"disable_keywords_match"`
+	DisableVectorMatch   bool                `json:"disable_vector_match"`
+	ChunkMetadataFilter  ChunkMetadataFilter `json:"chunk_metadata_filter,omitempty"`
 }
 
 // HybridSearch performs hybrid search.

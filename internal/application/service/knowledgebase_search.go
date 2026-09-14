@@ -233,17 +233,18 @@ func (s *knowledgeBaseService) HybridSearch(ctx context.Context,
 	retrieveCtx, retrieveSpan := langfuse.GetManager().StartSpan(ctx, langfuse.SpanOptions{
 		Name: "retrieve",
 		Input: map[string]interface{}{
-			"query_text":             params.QueryText,
-			"kb_ids":                 searchKBIDs,
-			"knowledge_ids":          params.KnowledgeIDs,
-			"tag_ids":                params.TagIDs,
-			"scope_tag_ids":          params.ScopeTagIDs,
-			"match_count":            matchCount,
-			"vector_threshold":       params.VectorThreshold,
-			"keyword_threshold":      params.KeywordThreshold,
-			"disable_vector_match":   params.DisableVectorMatch,
-			"disable_keywords_match": params.DisableKeywordsMatch,
-			"group_count":            len(groups),
+			"query_text":                  params.QueryText,
+			"kb_ids":                      searchKBIDs,
+			"knowledge_ids":               params.KnowledgeIDs,
+			"tag_ids":                     params.TagIDs,
+			"scope_tag_ids":               params.ScopeTagIDs,
+			"chunk_metadata_filter_count": len(params.ChunkMetadataFilter),
+			"match_count":                 matchCount,
+			"vector_threshold":            params.VectorThreshold,
+			"keyword_threshold":           params.KeywordThreshold,
+			"disable_vector_match":        params.DisableVectorMatch,
+			"disable_keywords_match":      params.DisableKeywordsMatch,
+			"group_count":                 len(groups),
 		},
 		Metadata: map[string]interface{}{
 			"primary_kb_id":       kb.ID,
@@ -297,7 +298,16 @@ func (s *knowledgeBaseService) HybridSearch(ctx context.Context,
 		deduplicatedChunks = deduplicatedChunks[:params.MatchCount]
 	}
 
-	return s.processSearchResults(ctx, deduplicatedChunks, params.SkipContextEnrichment)
+	// Enrichment can append parent, nearby, or relation chunks that were not
+	// part of retrieval and therefore did not pass the metadata predicate.
+	// Disable it for conditional searches so every returned chunk satisfies the
+	// requested strong filter.
+	skipContextEnrichment := shouldSkipContextEnrichment(params)
+	return s.processSearchResults(ctx, deduplicatedChunks, skipContextEnrichment)
+}
+
+func shouldSkipContextEnrichment(params types.SearchParams) bool {
+	return params.SkipContextEnrichment || len(params.ChunkMetadataFilter) > 0
 }
 
 // normalizedMatchCount resolves the effective primary-match cap for a search.
@@ -427,15 +437,16 @@ func (s *knowledgeBaseService) buildRetrievalParams(
 
 		appendVectorParams := func(kbIDs []string, knowledgeType string) {
 			retrieveParams = append(retrieveParams, types.RetrieveParams{
-				Query:            params.QueryText,
-				Embedding:        queryEmbedding,
-				KnowledgeBaseIDs: kbIDs,
-				TopK:             matchCount,
-				Threshold:        params.VectorThreshold,
-				RetrieverType:    types.VectorRetrieverType,
-				KnowledgeIDs:     params.KnowledgeIDs,
-				TagIDs:           params.TagIDs,
-				KnowledgeType:    knowledgeType,
+				Query:               params.QueryText,
+				Embedding:           queryEmbedding,
+				KnowledgeBaseIDs:    kbIDs,
+				TopK:                matchCount,
+				Threshold:           params.VectorThreshold,
+				RetrieverType:       types.VectorRetrieverType,
+				KnowledgeIDs:        params.KnowledgeIDs,
+				TagIDs:              params.TagIDs,
+				ChunkMetadataFilter: params.ChunkMetadataFilter,
+				KnowledgeType:       knowledgeType,
 			})
 		}
 
@@ -457,13 +468,14 @@ func (s *knowledgeBaseService) buildRetrievalParams(
 		len(docKeywordKBIDs) > 0 {
 		logger.Info(ctx, "Keyword retrieval supported, preparing keyword retrieval parameters")
 		retrieveParams = append(retrieveParams, types.RetrieveParams{
-			Query:            params.QueryText,
-			KnowledgeBaseIDs: docKeywordKBIDs,
-			TopK:             matchCount,
-			Threshold:        params.KeywordThreshold,
-			RetrieverType:    types.KeywordsRetrieverType,
-			KnowledgeIDs:     params.KnowledgeIDs,
-			TagIDs:           params.TagIDs,
+			Query:               params.QueryText,
+			KnowledgeBaseIDs:    docKeywordKBIDs,
+			TopK:                matchCount,
+			Threshold:           params.KeywordThreshold,
+			RetrieverType:       types.KeywordsRetrieverType,
+			KnowledgeIDs:        params.KnowledgeIDs,
+			TagIDs:              params.TagIDs,
+			ChunkMetadataFilter: params.ChunkMetadataFilter,
 		})
 		logger.Info(ctx, "Keyword retrieval parameters setup completed")
 	}

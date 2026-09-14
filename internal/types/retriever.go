@@ -48,6 +48,9 @@ type RetrieveParams struct {
 	KnowledgeIDs []string
 	// Tag IDs for filtering (used for FAQ priority filtering)
 	TagIDs []string
+	// ChunkMetadataFilter requires the related chunks.metadata JSONB value to
+	// contain all supplied key/value pairs.
+	ChunkMetadataFilter JSONMap
 	// Excluded knowledge IDs
 	ExcludeKnowledgeIDs []string
 	// Excluded chunk IDs

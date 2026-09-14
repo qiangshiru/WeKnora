@@ -241,6 +241,10 @@ type SearchParams struct {
 	TagIDs               []string  `json:"tag_ids"` // Tag IDs for filtering (used for FAQ priority filtering)
 	ScopeTagIDs          []string  `json:"scope_tag_ids,omitempty"`
 	OnlyRecommended      bool      `json:"only_recommended"`
+	// ChunkMetadataFilter requires chunks.metadata to contain every supplied
+	// key/value pair. An empty object means no metadata filtering. This is
+	// currently supported by the Postgres retriever only.
+	ChunkMetadataFilter JSONMap `json:"chunk_metadata_filter,omitempty"`
 	// KnowledgeBaseIDs overrides the single KB ID passed to HybridSearch,
 	// allowing a single retrieval call to span multiple KBs that share the
 	// same embedding model. When empty, HybridSearch uses its own id parameter.

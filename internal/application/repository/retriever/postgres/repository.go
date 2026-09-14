@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -160,6 +161,25 @@ func (g *pgRepository) Retrieve(ctx context.Context, params types.RetrieveParams
 	return nil, err
 }
 
+// chunkMetadataFilterClause builds a parameterized JSONB containment filter.
+// The correlated EXISTS is a semijoin from embeddings.chunk_id to chunks.id,
+// so it neither duplicates embedding rows nor denormalizes chunk metadata.
+func chunkMetadataFilterClause(filter types.JSONMap, placeholder string) (string, string, error) {
+	if len(filter) == 0 {
+		return "", "", nil
+	}
+	value, err := json.Marshal(filter)
+	if err != nil {
+		return "", "", fmt.Errorf("marshal chunk metadata filter: %w", err)
+	}
+	return fmt.Sprintf(
+		"EXISTS (SELECT 1 FROM public.chunks AS filter_chunks "+
+			"WHERE filter_chunks.id = embeddings.chunk_id "+
+			"AND filter_chunks.metadata @> %s::jsonb)",
+		placeholder,
+	), string(value), nil
+}
+
 // KeywordsRetrieve performs keyword-based search using PostgreSQL full-text search
 func (g *pgRepository) KeywordsRetrieve(ctx context.Context,
 	params types.RetrieveParams,
@@ -193,6 +213,17 @@ func (g *pgRepository) KeywordsRetrieve(ctx context.Context,
 			Values: common.ToInterfaceSlice(params.TagIDs),
 		})
 	}
+	metadataClause, metadataJSON, err := chunkMetadataFilterClause(params.ChunkMetadataFilter, "?")
+	if err != nil {
+		return nil, err
+	}
+	if metadataClause != "" {
+		logger.GetLogger(ctx).Debugf(
+			"[Postgres] Filtering by %d chunk metadata fields",
+			len(params.ChunkMetadataFilter),
+		)
+		conds = append(conds, clause.Expr{SQL: metadataClause, Vars: []interface{}{metadataJSON}})
+	}
 
 	// Use ParadeDB's ||| operator for matching any token
 	conds = append(conds, clause.Expr{
@@ -210,7 +241,7 @@ func (g *pgRepository) KeywordsRetrieve(ctx context.Context,
 	}})
 
 	var embeddingDBList []pgVectorWithScore
-	err := g.db.WithContext(ctx).Clauses(conds...).Debug().
+	err = g.db.WithContext(ctx).Clauses(conds...).Debug().
 		Select([]string{
 			"paradedb.score(id) as score",
 			"id",
@@ -275,11 +306,8 @@ func (g *pgRepository) VectorRetrieve(ctx context.Context,
 	whereParts := make([]string, 0)
 	allVars := make([]interface{}, 0)
 
-	// Add query vector first (used in ORDER BY for HNSW index)
-	allVars = append(allVars, queryVector)
-
 	// Dimension filter (required for HNSW index WHERE clause)
-	whereParts = append(whereParts, fmt.Sprintf("dimension = $%d", len(allVars)+1))
+	whereParts = append(whereParts, "dimension = ?")
 	allVars = append(allVars, dimension)
 
 	// KnowledgeBaseIDs and KnowledgeIDs use AND logic
@@ -292,9 +320,8 @@ func (g *pgRepository) VectorRetrieve(ctx context.Context,
 			params.KnowledgeBaseIDs,
 		)
 		placeholders := make([]string, len(params.KnowledgeBaseIDs))
-		paramStart := len(allVars) + 1
 		for i := range params.KnowledgeBaseIDs {
-			placeholders[i] = fmt.Sprintf("$%d", paramStart+i)
+			placeholders[i] = "?"
 			allVars = append(allVars, params.KnowledgeBaseIDs[i])
 		}
 		whereParts = append(whereParts, fmt.Sprintf("knowledge_base_id IN (%s)",
@@ -306,9 +333,8 @@ func (g *pgRepository) VectorRetrieve(ctx context.Context,
 			params.KnowledgeIDs,
 		)
 		placeholders := make([]string, len(params.KnowledgeIDs))
-		paramStart := len(allVars) + 1
 		for i := range params.KnowledgeIDs {
-			placeholders[i] = fmt.Sprintf("$%d", paramStart+i)
+			placeholders[i] = "?"
 			allVars = append(allVars, params.KnowledgeIDs[i])
 		}
 		whereParts = append(whereParts, fmt.Sprintf("knowledge_id IN (%s)",
@@ -321,17 +347,31 @@ func (g *pgRepository) VectorRetrieve(ctx context.Context,
 			params.TagIDs,
 		)
 		placeholders := make([]string, len(params.TagIDs))
-		paramStart := len(allVars) + 1
 		for i := range params.TagIDs {
-			placeholders[i] = fmt.Sprintf("$%d", paramStart+i)
+			placeholders[i] = "?"
 			allVars = append(allVars, params.TagIDs[i])
 		}
 		whereParts = append(whereParts, fmt.Sprintf("tag_id IN (%s)",
 			strings.Join(placeholders, ", ")))
 	}
+	metadataClause, metadataJSON, err := chunkMetadataFilterClause(
+		params.ChunkMetadataFilter,
+		"?",
+	)
+	if err != nil {
+		return nil, err
+	}
+	if metadataClause != "" {
+		logger.GetLogger(ctx).Debugf(
+			"[Postgres] Filtering vector search by %d chunk metadata fields",
+			len(params.ChunkMetadataFilter),
+		)
+		allVars = append(allVars, metadataJSON)
+		whereParts = append(whereParts, metadataClause)
+	}
 
 	// is_enabled filter
-	whereParts = append(whereParts, fmt.Sprintf("(is_enabled IS NULL OR is_enabled = $%d)", len(allVars)+1))
+	whereParts = append(whereParts, "(is_enabled IS NULL OR is_enabled = ?)")
 	allVars = append(allVars, true)
 
 	// Build WHERE clause string
@@ -370,10 +410,6 @@ func (g *pgRepository) VectorRetrieve(ctx context.Context,
 	// `embedding::halfvec(%d)` cast on both sides of `<=>` is therefore NOT
 	// redundant — it is the only way to make the HNSW index get used at all.
 	// See: pgvector issues #702, #835 and ParadeDB "indexing-expressions" docs.
-	subqueryLimitParam := len(allVars) + 1
-	thresholdParam := len(allVars) + 2
-	finalLimitParam := len(allVars) + 3
-
 	querySQL := fmt.Sprintf(`
 		SELECT 
 			id, content, source_id, source_type, chunk_id, knowledge_id, knowledge_base_id, tag_id,
@@ -381,20 +417,26 @@ func (g *pgRepository) VectorRetrieve(ctx context.Context,
 		FROM (
 			SELECT 
 				id, content, source_id, source_type, chunk_id, knowledge_id, knowledge_base_id, tag_id,
-				embedding::halfvec(%[1]d) <=> $1::halfvec(%[1]d) as distance
+				embedding::halfvec(%[1]d) <=> ?::halfvec(%[1]d) as distance
 			FROM embeddings
 			%[2]s
-			ORDER BY embedding::halfvec(%[1]d) <=> $1::halfvec(%[1]d)
-			LIMIT $%[3]d
+			ORDER BY embedding::halfvec(%[1]d) <=> ?::halfvec(%[1]d)
+			LIMIT ?
 		) AS candidates
-		WHERE distance <= $%[4]d
+		WHERE distance <= ?
 		ORDER BY distance ASC
-		LIMIT $%[5]d
-	`, dimension, whereClause, subqueryLimitParam, thresholdParam, finalLimitParam)
+		LIMIT ?
+	`, dimension, whereClause)
 
-	allVars = append(allVars, expandedTopK)       // LIMIT in subquery
-	allVars = append(allVars, 1-params.Threshold) // Distance threshold
-	allVars = append(allVars, params.TopK)        // Final LIMIT
+	// GORM binds Raw SQL variables only for `?` placeholders. The query vector
+	// occurs twice in the SQL, so it must also occur twice in the argument list.
+	queryVars := make([]interface{}, 0, len(allVars)+5)
+	queryVars = append(queryVars, queryVector)
+	queryVars = append(queryVars, allVars...)
+	queryVars = append(queryVars, queryVector)
+	queryVars = append(queryVars, expandedTopK)       // LIMIT in subquery
+	queryVars = append(queryVars, 1-params.Threshold) // Distance threshold
+	queryVars = append(queryVars, params.TopK)        // Final LIMIT
 
 	// HNSW's `ef_search` defaults to 40, which is much smaller than our
 	// `expandedTopK` budget (up to 1000). Without raising it, HNSW would only
@@ -409,7 +451,7 @@ func (g *pgRepository) VectorRetrieve(ctx context.Context,
 
 	var embeddingDBList []pgVectorWithScore
 
-	err := g.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	err = g.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Exec(fmt.Sprintf("SET LOCAL hnsw.ef_search = %d", efSearch)).Error; err != nil {
 			// Treat as non-fatal: pgvector should always expose this GUC, but if
 			// for any reason it does not we still want the query to run (just
@@ -429,7 +471,7 @@ func (g *pgRepository) VectorRetrieve(ctx context.Context,
 			// abort transaction and let the fallback path below handle it.
 			return err
 		}
-		return tx.Raw(querySQL, allVars...).Scan(&embeddingDBList).Error
+		return tx.Raw(querySQL, queryVars...).Scan(&embeddingDBList).Error
 	})
 
 	// Fallback: if the transaction failed because of an unsupported GUC (e.g.
@@ -439,7 +481,7 @@ func (g *pgRepository) VectorRetrieve(ctx context.Context,
 		(strings.Contains(err.Error(), "hnsw.ef_search") ||
 			strings.Contains(err.Error(), "hnsw.iterative_scan")) {
 		logger.GetLogger(ctx).Warnf("[Postgres] Retrying vector query without HNSW GUC overrides: %v", err)
-		err = g.db.WithContext(ctx).Raw(querySQL, allVars...).Scan(&embeddingDBList).Error
+		err = g.db.WithContext(ctx).Raw(querySQL, queryVars...).Scan(&embeddingDBList).Error
 	}
 
 	if err == gorm.ErrRecordNotFound {
