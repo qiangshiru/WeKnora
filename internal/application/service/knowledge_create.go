@@ -7,6 +7,7 @@ import (
 	"mime/multipart"
 	"net/url"
 	"path"
+	"slices"
 	"strings"
 	"time"
 
@@ -721,6 +722,231 @@ func (s *knowledgeService) CreateKnowledgeFromPassageSync(ctx context.Context,
 	kbID string, passage []string, channel string,
 ) (*types.Knowledge, error) {
 	return s.createKnowledgeFromPassageInternal(ctx, kbID, passage, true, channel)
+}
+
+// CreatePreChunkedKnowledge persists and indexes one upstream document made of
+// pre-split chunks. It deliberately bypasses document conversion, chunking, and
+// enrichment.
+func (s *knowledgeService) CreatePreChunkedKnowledge(
+	ctx context.Context,
+	kbID string,
+	payload *types.PreChunkedKnowledgePayload,
+) (*types.PreChunkedKnowledgeResult, bool, error) {
+	if payload == nil {
+		return nil, false, werrors.NewBadRequestError("请求内容不能为空")
+	}
+
+	sourceDocumentID, ok := secutils.ValidateInput(payload.SourceDocumentID)
+	if !ok || strings.TrimSpace(sourceDocumentID) == "" {
+		return nil, false, werrors.NewValidationError("source_document_id 不能为空或包含非法内容")
+	}
+	if len(payload.Chunks) == 0 {
+		return nil, false, werrors.NewValidationError("chunks 不能为空")
+	}
+	metadata, err := validatePreChunkedDocumentMetadata(payload.CustomMetadata)
+	if err != nil {
+		return nil, false, err
+	}
+	parsedChunks, sourceChunkIDs, err := buildPreChunkedParsedChunks(payload.Chunks)
+	if err != nil {
+		return nil, false, err
+	}
+	title, ok := secutils.ValidateInput(payload.Title)
+	if !ok {
+		return nil, false, werrors.NewValidationError("title 包含非法内容")
+	}
+	if title == "" {
+		title = sourceDocumentID
+	}
+
+	kb, err := s.kbService.GetKnowledgeBaseByID(ctx, kbID)
+	if err != nil {
+		return nil, false, err
+	}
+	if kb.Type == types.KnowledgeBaseTypeFAQ {
+		return nil, false, werrors.NewBadRequestError("FAQ 知识库不支持预切分写入")
+	}
+	if err := s.checkStorageEngineConfigured(ctx, kb); err != nil {
+		return nil, false, err
+	}
+
+	tenantID := ctx.Value(types.TenantIDContextKey).(uint64)
+	if err := s.validateKnowledgeTagIDs(ctx, tenantID, kbID, payload.TagIDs); err != nil {
+		return nil, false, err
+	}
+	existing, err := s.repo.FindByMetadataKey(ctx, tenantID, kbID, "external_id", sourceDocumentID)
+	if err != nil {
+		return nil, false, err
+	}
+	if existing != nil {
+		if existing.ParseStatus != types.ParseStatusCompleted || existing.EnableStatus != "enabled" {
+			return &types.PreChunkedKnowledgeResult{KnowledgeID: existing.ID}, false, fmt.Errorf(
+				"pre-chunked knowledge %s exists but is not indexed: parse_status=%s enable_status=%s",
+				existing.ID, existing.ParseStatus, existing.EnableStatus,
+			)
+		}
+		if err := s.setAndAttachKnowledgeTags(ctx, tenantID, kbID, existing, payload.TagIDs); err != nil {
+			return nil, false, err
+		}
+		mappings, err := s.preChunkedChunkMappings(ctx, existing.ID, sourceChunkIDs)
+		if err != nil {
+			return nil, false, err
+		}
+		return &types.PreChunkedKnowledgeResult{KnowledgeID: existing.ID, Chunks: mappings}, false, nil
+	}
+
+	// external_id is internal idempotency metadata. All caller-provided scalar
+	// metadata is retained so hybrid-search returns it in
+	// SearchResult.metadata.
+	metadata["external_id"] = sourceDocumentID
+	metadata["source_document_id"] = sourceDocumentID
+	metadataJSON, err := json.Marshal(metadata)
+	if err != nil {
+		return nil, false, err
+	}
+	now := time.Now()
+	knowledge := &types.Knowledge{
+		ID:               uuid.New().String(),
+		TenantID:         tenantID,
+		KnowledgeBaseID:  kbID,
+		Type:             "passage",
+		Title:            title,
+		Source:           "pre_chunked",
+		Channel:          defaultChannel(payload.Channel),
+		ParseStatus:      types.ParseStatusPending,
+		EnableStatus:     "disabled",
+		EmbeddingModelID: kb.EmbeddingModelID,
+		Metadata:         types.JSON(metadataJSON),
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	if err := s.repo.CreateKnowledge(ctx, knowledge); err != nil {
+		return nil, false, err
+	}
+	if err := s.setAndAttachKnowledgeTags(ctx, tenantID, kbID, knowledge, payload.TagIDs); err != nil {
+		return nil, false, err
+	}
+
+	s.processPreChunkedKnowledge(ctx, kb, knowledge, parsedChunks)
+	if knowledge.ParseStatus != types.ParseStatusCompleted || knowledge.EnableStatus != "enabled" {
+		return &types.PreChunkedKnowledgeResult{KnowledgeID: knowledge.ID}, true, fmt.Errorf(
+			"pre-chunk indexing did not complete: parse_status=%s enable_status=%s error=%s",
+			knowledge.ParseStatus, knowledge.EnableStatus, knowledge.ErrorMessage,
+		)
+	}
+	mappings, err := s.preChunkedChunkMappings(ctx, knowledge.ID, sourceChunkIDs)
+	if err != nil {
+		return nil, true, err
+	}
+	recordKBActivity(ctx, s.audit, tenantID, kbID, types.AuditActionKnowledgeCreated,
+		"knowledge", knowledge.ID, types.AuditOutcomeSuccess, map[string]any{
+			"title": title, "source_type": "pre_chunked", "source_document_id": sourceDocumentID,
+		})
+	return &types.PreChunkedKnowledgeResult{KnowledgeID: knowledge.ID, Chunks: mappings}, true, nil
+}
+
+func validatePreChunkedDocumentMetadata(input map[string]any) (map[string]any, error) {
+	if len(input) > 20 {
+		return nil, werrors.NewValidationError("custom_metadata 最多支持 20 个字段")
+	}
+	clean := make(map[string]any, len(input)+1)
+	for rawKey, value := range input {
+		key := strings.TrimSpace(rawKey)
+		if key == "" || len(key) > 64 {
+			return nil, werrors.NewValidationError(fmt.Sprintf("custom_metadata 字段名无效: %q", rawKey))
+		}
+		switch typed := value.(type) {
+		case string:
+			trimmed := strings.TrimSpace(typed)
+			if trimmed == "" {
+				continue
+			}
+			if len(trimmed) > 1000 {
+				return nil, werrors.NewValidationError(fmt.Sprintf("custom_metadata.%s 超过 1000 字符", key))
+			}
+			clean[key] = trimmed
+		case float64, bool:
+			clean[key] = typed
+		case nil:
+			continue
+		default:
+			return nil, werrors.NewValidationError(
+				fmt.Sprintf("custom_metadata.%s 仅支持字符串、数字或布尔值", key),
+			)
+		}
+	}
+	return clean, nil
+}
+
+func buildPreChunkedParsedChunks(chunks []types.PreChunkedChunk) ([]types.ParsedChunk, []string, error) {
+	parsed := make([]types.ParsedChunk, 0, len(chunks))
+	type sourceOrder struct {
+		sourceChunkID string
+		chunkIndex    int
+	}
+	sourceOrders := make([]sourceOrder, 0, len(chunks))
+	seen := make(map[string]struct{}, len(chunks))
+	offset := 0
+	for i, chunk := range chunks {
+		sourceChunkID, ok := secutils.ValidateInput(chunk.SourceChunkID)
+		if !ok || strings.TrimSpace(sourceChunkID) == "" {
+			return nil, nil, werrors.NewValidationError(fmt.Sprintf("chunks[%d].source_chunk_id 不能为空或包含非法内容", i))
+		}
+		if _, exists := seen[sourceChunkID]; exists {
+			return nil, nil, werrors.NewValidationError(fmt.Sprintf("source_chunk_id 重复: %s", sourceChunkID))
+		}
+		seen[sourceChunkID] = struct{}{}
+		indexContent, ok := secutils.ValidateInput(chunk.IndexContent)
+		if !ok || strings.TrimSpace(indexContent) == "" {
+			return nil, nil, werrors.NewValidationError(fmt.Sprintf("chunks[%d].index_content 不能为空或包含非法内容", i))
+		}
+		chunkIndex := chunk.ChunkIndex
+		if chunkIndex <= 0 {
+			chunkIndex = i + 1
+		}
+		end := offset + len([]rune(indexContent))
+		parsed = append(parsed, types.ParsedChunk{
+			Content: indexContent,
+			Seq:     chunkIndex,
+			Start:   offset,
+			End:     end,
+		})
+		sourceOrders = append(sourceOrders, sourceOrder{sourceChunkID: sourceChunkID, chunkIndex: chunkIndex})
+		offset = end
+	}
+	slices.SortFunc(sourceOrders, func(a, b sourceOrder) int {
+		return a.chunkIndex - b.chunkIndex
+	})
+	sourceChunkIDs := make([]string, 0, len(sourceOrders))
+	for _, item := range sourceOrders {
+		sourceChunkIDs = append(sourceChunkIDs, item.sourceChunkID)
+	}
+	return parsed, sourceChunkIDs, nil
+}
+
+func (s *knowledgeService) preChunkedChunkMappings(
+	ctx context.Context,
+	knowledgeID string,
+	sourceChunkIDs []string,
+) ([]types.PreChunkedChunkMapping, error) {
+	chunks, err := s.chunkService.ListChunksByKnowledgeID(ctx, knowledgeID)
+	if err != nil {
+		return nil, err
+	}
+	slices.SortFunc(chunks, func(a, b *types.Chunk) int {
+		return a.ChunkIndex - b.ChunkIndex
+	})
+	mappings := make([]types.PreChunkedChunkMapping, 0, len(sourceChunkIDs))
+	for i, sourceChunkID := range sourceChunkIDs {
+		if i >= len(chunks) {
+			return nil, fmt.Errorf("pre-chunked mapping incomplete: source chunks=%d weknora chunks=%d", len(sourceChunkIDs), len(chunks))
+		}
+		mappings = append(mappings, types.PreChunkedChunkMapping{
+			SourceChunkID: sourceChunkID,
+			ChunkID:       chunks[i].ID,
+		})
+	}
+	return mappings, nil
 }
 
 // CreateKnowledgeFromManual creates or saves manual Markdown knowledge content.
