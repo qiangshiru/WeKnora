@@ -2,6 +2,8 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -102,6 +104,60 @@ func TestHybridSearchAcceptsQueryText(t *testing.T) {
 	if svc.searchParams.MatchCount != 3 {
 		t.Fatalf("match count = %d, want 3", svc.searchParams.MatchCount)
 	}
+}
+
+func TestHybridSearchNormalizesChunkIDs(t *testing.T) {
+	svc := &hybridSearchTestService{}
+	response := performHybridSearchRequest(
+		svc,
+		`{"query_text":"MiniMax","chunk_ids":[" chunk-1 ","chunk-2","chunk-1"]}`,
+	)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", response.Code, response.Body.String())
+	}
+	want := []string{"chunk-1", "chunk-2"}
+	if len(svc.searchParams.ChunkIDs) != len(want) {
+		t.Fatalf("chunk IDs = %#v, want %#v", svc.searchParams.ChunkIDs, want)
+	}
+	for i := range want {
+		if svc.searchParams.ChunkIDs[i] != want[i] {
+			t.Fatalf("chunk IDs = %#v, want %#v", svc.searchParams.ChunkIDs, want)
+		}
+	}
+}
+
+func TestHybridSearchRejectsInvalidChunkIDs(t *testing.T) {
+	t.Run("empty value", func(t *testing.T) {
+		svc := &hybridSearchTestService{}
+		response := performHybridSearchRequest(svc, `{"query_text":"MiniMax","chunk_ids":[" "]}`)
+
+		if response.Code != http.StatusBadRequest || svc.searchCalls != 0 {
+			t.Fatalf("expected 400 without search, got code=%d calls=%d body=%s",
+				response.Code, svc.searchCalls, response.Body.String())
+		}
+	})
+
+	t.Run("too many unique values", func(t *testing.T) {
+		chunkIDs := make([]string, maxHybridSearchChunkIDs+1)
+		for i := range chunkIDs {
+			chunkIDs[i] = fmt.Sprintf("chunk-%d", i)
+		}
+		body, err := json.Marshal(map[string]interface{}{
+			"query_text": "MiniMax",
+			"chunk_ids":  chunkIDs,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		svc := &hybridSearchTestService{}
+		response := performHybridSearchRequest(svc, string(body))
+
+		if response.Code != http.StatusBadRequest || svc.searchCalls != 0 {
+			t.Fatalf("expected 400 without search, got code=%d calls=%d body=%s",
+				response.Code, svc.searchCalls, response.Body.String())
+		}
+	})
 }
 
 func TestHybridSearchAcceptsPrecomputedVectorWithoutQueryText(t *testing.T) {

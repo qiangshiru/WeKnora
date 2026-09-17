@@ -137,7 +137,7 @@ func (s *knowledgeBaseService) retrieveFromStores(
 // will not flag this path).
 //
 // The value-copy of each RetrieveParams shallow-copies its reference
-// fields (Embedding, KnowledgeBaseIDs, TagIDs, KnowledgeIDs,
+// fields (Embedding, KnowledgeBaseIDs, TagIDs, KnowledgeIDs, ChunkIDs,
 // AdditionalParams). All fan-out goroutines from a single
 // retrieveFromStores call therefore share the same backing arrays for
 // those fields. Every retriever implementation today treats them as

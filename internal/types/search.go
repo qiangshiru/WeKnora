@@ -238,9 +238,12 @@ type SearchParams struct {
 	DisableKeywordsMatch bool      `json:"disable_keywords_match"`
 	DisableVectorMatch   bool      `json:"disable_vector_match"`
 	KnowledgeIDs         []string  `json:"knowledge_ids"`
-	TagIDs               []string  `json:"tag_ids"` // Tag IDs for filtering (used for FAQ priority filtering)
-	ScopeTagIDs          []string  `json:"scope_tag_ids,omitempty"`
-	OnlyRecommended      bool      `json:"only_recommended"`
+	// ChunkIDs limits retrieval to embeddings whose chunk_id is in this allowlist.
+	// An empty list disables chunk ID filtering.
+	ChunkIDs        []string `json:"chunk_ids,omitempty"`
+	TagIDs          []string `json:"tag_ids"` // Tag IDs for filtering (used for FAQ priority filtering)
+	ScopeTagIDs     []string `json:"scope_tag_ids,omitempty"`
+	OnlyRecommended bool     `json:"only_recommended"`
 	// ChunkMetadataFilter requires chunks.metadata to contain every supplied
 	// key/value pair. An empty object means no metadata filtering. This is
 	// currently supported by the Postgres retriever only.

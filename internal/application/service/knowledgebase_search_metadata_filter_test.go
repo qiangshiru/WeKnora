@@ -13,4 +13,6 @@ func TestShouldSkipContextEnrichmentForMetadataFilter(t *testing.T) {
 	require.True(t, shouldSkipContextEnrichment(types.SearchParams{
 		ChunkMetadataFilter: types.JSONMap{"分类": "规则", "is_body": true},
 	}))
+	require.False(t, shouldSkipContextEnrichment(types.SearchParams{ChunkIDs: []string{}}))
+	require.True(t, shouldSkipContextEnrichment(types.SearchParams{ChunkIDs: []string{"chunk-1"}}))
 }

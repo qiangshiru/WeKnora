@@ -46,6 +46,8 @@ type RetrieveParams struct {
 	KnowledgeBaseIDs []string
 	// Knowledge IDs
 	KnowledgeIDs []string
+	// Chunk IDs to include. An empty list disables chunk ID filtering.
+	ChunkIDs []string
 	// Tag IDs for filtering (used for FAQ priority filtering)
 	TagIDs []string
 	// ChunkMetadataFilter requires the related chunks.metadata JSONB value to

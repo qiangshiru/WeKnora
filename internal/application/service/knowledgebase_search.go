@@ -236,6 +236,7 @@ func (s *knowledgeBaseService) HybridSearch(ctx context.Context,
 			"query_text":                  params.QueryText,
 			"kb_ids":                      searchKBIDs,
 			"knowledge_ids":               params.KnowledgeIDs,
+			"chunk_id_filter_count":       len(params.ChunkIDs),
 			"tag_ids":                     params.TagIDs,
 			"scope_tag_ids":               params.ScopeTagIDs,
 			"chunk_metadata_filter_count": len(params.ChunkMetadataFilter),
@@ -307,7 +308,7 @@ func (s *knowledgeBaseService) HybridSearch(ctx context.Context,
 }
 
 func shouldSkipContextEnrichment(params types.SearchParams) bool {
-	return params.SkipContextEnrichment || len(params.ChunkMetadataFilter) > 0
+	return params.SkipContextEnrichment || len(params.ChunkMetadataFilter) > 0 || len(params.ChunkIDs) > 0
 }
 
 // normalizedMatchCount resolves the effective primary-match cap for a search.
@@ -444,6 +445,7 @@ func (s *knowledgeBaseService) buildRetrievalParams(
 				Threshold:           params.VectorThreshold,
 				RetrieverType:       types.VectorRetrieverType,
 				KnowledgeIDs:        params.KnowledgeIDs,
+				ChunkIDs:            params.ChunkIDs,
 				TagIDs:              params.TagIDs,
 				ChunkMetadataFilter: params.ChunkMetadataFilter,
 				KnowledgeType:       knowledgeType,
@@ -474,6 +476,7 @@ func (s *knowledgeBaseService) buildRetrievalParams(
 			Threshold:           params.KeywordThreshold,
 			RetrieverType:       types.KeywordsRetrieverType,
 			KnowledgeIDs:        params.KnowledgeIDs,
+			ChunkIDs:            params.ChunkIDs,
 			TagIDs:              params.TagIDs,
 			ChunkMetadataFilter: params.ChunkMetadataFilter,
 		})

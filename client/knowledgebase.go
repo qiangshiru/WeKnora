@@ -408,6 +408,7 @@ type SearchParams struct {
 	MatchCount           int                 `json:"match_count"`
 	DisableKeywordsMatch bool                `json:"disable_keywords_match"`
 	DisableVectorMatch   bool                `json:"disable_vector_match"`
+	ChunkIDs             []string            `json:"chunk_ids,omitempty"`
 	ChunkMetadataFilter  ChunkMetadataFilter `json:"chunk_metadata_filter,omitempty"`
 }
 

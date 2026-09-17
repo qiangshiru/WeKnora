@@ -46,6 +46,31 @@ type KnowledgeBaseHandler struct {
 	storageResolver interfaces.StorageBackendResolver
 }
 
+const maxHybridSearchChunkIDs = 1000
+
+func normalizeHybridSearchChunkIDs(raw []string) ([]string, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	seen := make(map[string]struct{}, len(raw))
+	normalized := make([]string, 0, len(raw))
+	for _, value := range raw {
+		id := strings.TrimSpace(value)
+		if id == "" {
+			return nil, errors.NewBadRequestError("chunk_ids must not contain empty values")
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		normalized = append(normalized, id)
+		if len(normalized) > maxHybridSearchChunkIDs {
+			return nil, errors.NewBadRequestError("chunk_ids must contain at most 1000 unique values")
+		}
+	}
+	return normalized, nil
+}
+
 // NewKnowledgeBaseHandler creates a new knowledge base handler instance
 func NewKnowledgeBaseHandler(
 	cfg *config.Config,
@@ -337,6 +362,11 @@ func (h *KnowledgeBaseHandler) HybridSearch(c *gin.Context) {
 	precomputedVectorOnly := len(req.QueryEmbedding) > 0 && req.DisableKeywordsMatch && !req.DisableVectorMatch
 	if strings.TrimSpace(req.QueryText) == "" && !precomputedVectorOnly {
 		_ = c.Error(apperrors.NewBadRequestError("query_text is required"))
+		return
+	}
+	req.ChunkIDs, err = normalizeHybridSearchChunkIDs(req.ChunkIDs)
+	if err != nil {
+		_ = c.Error(err)
 		return
 	}
 

@@ -131,6 +131,7 @@ curl -X PUT $BASE/api/v1/knowledge-bases/kb-1/pin -H "Authorization: Bearer $TOK
 | `match_count` | int | 否 | 返回条数上限 |
 | `disable_keywords_match` / `disable_vector_match` | bool | 否 | 关闭某一路召回 |
 | `knowledge_ids` | []string | 否 | 限定知识条目 |
+| `chunk_ids` | []string | 否 | 严格限定 `embeddings.chunk_id` 允许列表，多个值为 OR；空数组表示不过滤，最多 1,000 个去重 ID；当前仅 PostgreSQL 检索后端支持 |
 | `tag_ids` | []string | 否 | 标签过滤（OR） |
 | `only_recommended` | bool | 否 | FAQ 仅推荐条目 |
 | `skip_context_enrichment` | bool | 否 | 跳过父块/上下文补齐 |
@@ -139,8 +140,11 @@ curl -X PUT $BASE/api/v1/knowledge-bases/kb-1/pin -H "Authorization: Bearer $TOK
 
 ```bash
 curl -X POST "$BASE/api/v1/knowledge-bases/kb-1/hybrid-search?resource_urls=public" -H "X-API-Key: $API_KEY" \
-  -H 'Content-Type: application/json' -d '{"query_text":"退款流程","match_count":5}'
+  -H 'Content-Type: application/json' \
+  -d '{"query_text":"退款流程","match_count":5,"chunk_ids":["chunk-1","chunk-2"]}'
 ```
+
+使用非空 `chunk_ids` 时，向量与关键词召回都会在排序和 TopK 之前应用过滤，且不会追加列表之外的父块、相邻块或关系块。ID 不存在、已禁用或不属于当前授权知识库时不会产生结果；空字符串、超过 1,000 个去重 ID，或对非 PostgreSQL 检索后端使用该字段时返回 400。
 
 ### POST /api/v1/knowledge-bases/copy
 

@@ -180,6 +180,21 @@ func chunkMetadataFilterClause(filter types.JSONMap, placeholder string) (string
 	), string(value), nil
 }
 
+// chunkIDFilterClause builds an IN predicate using placeholders only. The
+// caller must pass the returned values to GORM in the same order.
+func chunkIDFilterClause(chunkIDs []string, column string) (string, []interface{}) {
+	if len(chunkIDs) == 0 {
+		return "", nil
+	}
+	placeholders := make([]string, len(chunkIDs))
+	values := make([]interface{}, len(chunkIDs))
+	for i, chunkID := range chunkIDs {
+		placeholders[i] = "?"
+		values[i] = chunkID
+	}
+	return fmt.Sprintf("%s IN (%s)", column, strings.Join(placeholders, ", ")), values
+}
+
 // KeywordsRetrieve performs keyword-based search using PostgreSQL full-text search
 func (g *pgRepository) KeywordsRetrieve(ctx context.Context,
 	params types.RetrieveParams,
@@ -204,6 +219,11 @@ func (g *pgRepository) KeywordsRetrieve(ctx context.Context,
 			Column: "knowledge_id",
 			Values: common.ToInterfaceSlice(params.KnowledgeIDs),
 		})
+	}
+	chunkIDClause, chunkIDVars := chunkIDFilterClause(params.ChunkIDs, "chunk_id")
+	if chunkIDClause != "" {
+		logger.GetLogger(ctx).Debugf("[Postgres] Filtering by %d chunk IDs", len(params.ChunkIDs))
+		conds = append(conds, clause.Expr{SQL: chunkIDClause, Vars: chunkIDVars})
 	}
 	// Filter by tag IDs if specified
 	if len(params.TagIDs) > 0 {
@@ -339,6 +359,15 @@ func (g *pgRepository) VectorRetrieve(ctx context.Context,
 		}
 		whereParts = append(whereParts, fmt.Sprintf("knowledge_id IN (%s)",
 			strings.Join(placeholders, ", ")))
+	}
+	chunkIDClause, chunkIDVars := chunkIDFilterClause(params.ChunkIDs, "chunk_id")
+	if chunkIDClause != "" {
+		logger.GetLogger(ctx).Debugf(
+			"[Postgres] Filtering vector search by %d chunk IDs",
+			len(params.ChunkIDs),
+		)
+		whereParts = append(whereParts, chunkIDClause)
+		allVars = append(allVars, chunkIDVars...)
 	}
 	// Filter by tag IDs if specified
 	if len(params.TagIDs) > 0 {

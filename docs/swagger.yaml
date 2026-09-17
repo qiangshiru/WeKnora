@@ -258,6 +258,11 @@ definitions:
     type: object
   github_com_Tencent_WeKnora_internal_types.AgentStep:
     properties:
+      intermediate_answer:
+        description: |-
+          IntermediateAnswer preserves a plain answer followed by a loop-end steer.
+          The canonical final answer is still stored in Message.Content.
+        type: boolean
       iteration:
         description: Iteration number (0-indexed)
         type: integer
@@ -278,6 +283,13 @@ definitions:
         description: Tools called in this step (Act phase)
         items:
           $ref: '#/definitions/github_com_Tencent_WeKnora_internal_types.ToolCall'
+        type: array
+      user_messages_before:
+        description: |-
+          UserMessagesBefore records consumed steer rows in delivery order, before
+          this model response. Unlike timestamps, this remains unambiguous on replay.
+        items:
+          type: string
         type: array
     type: object
   github_com_Tencent_WeKnora_internal_types.AnswerStrategy:
@@ -1549,6 +1561,9 @@ definitions:
         type: string
     required:
     - role
+    type: object
+  github_com_Tencent_WeKnora_internal_types.JSONMap:
+    additionalProperties: {}
     type: object
   github_com_Tencent_WeKnora_internal_types.JoinByOrganizationIDRequest:
     properties:
@@ -2877,6 +2892,37 @@ definitions:
           nil preserves the parser default; an explicit false disables the mode.
         type: boolean
     type: object
+  github_com_Tencent_WeKnora_internal_types.PreChunkedChunk:
+    properties:
+      chunk_index:
+        type: integer
+      content:
+        type: string
+      index_content:
+        type: string
+      source_chunk_id:
+        type: string
+    type: object
+  github_com_Tencent_WeKnora_internal_types.PreChunkedKnowledgePayload:
+    properties:
+      channel:
+        type: string
+      chunks:
+        items:
+          $ref: '#/definitions/github_com_Tencent_WeKnora_internal_types.PreChunkedChunk'
+        type: array
+      custom_metadata:
+        additionalProperties: {}
+        type: object
+      source_document_id:
+        type: string
+      tag_ids:
+        items:
+          type: string
+        type: array
+      title:
+        type: string
+    type: object
   github_com_Tencent_WeKnora_internal_types.PromptCacheStatus:
     enum:
     - unsupported
@@ -3307,6 +3353,20 @@ definitions:
     type: object
   github_com_Tencent_WeKnora_internal_types.SearchParams:
     properties:
+      chunk_ids:
+        description: |-
+          ChunkIDs limits retrieval to embeddings whose chunk_id is in this allowlist.
+          An empty list disables chunk ID filtering.
+        items:
+          type: string
+        type: array
+      chunk_metadata_filter:
+        allOf:
+        - $ref: '#/definitions/github_com_Tencent_WeKnora_internal_types.JSONMap'
+        description: |-
+          ChunkMetadataFilter requires chunks.metadata to contain every supplied
+          key/value pair. An empty object means no metadata filtering. This is
+          currently supported by the Postgres retriever only.
       disable_keywords_match:
         type: boolean
       disable_vector_match:
@@ -6440,6 +6500,30 @@ definitions:
         items:
           type: string
         type: array
+    required:
+    - query
+    type: object
+  internal_handler_session.SteerMessageRequest:
+    properties:
+      channel:
+        type: string
+      delivery:
+        description: Delivery is "after" (default) or "inject". See the constants
+          above.
+        type: string
+      expected_assistant_message_id:
+        description: |-
+          Optional for older clients. New clients pin delivery to the run they see
+          and supply a stable ID so a consume event may precede the HTTP response.
+        type: string
+      mentioned_items:
+        items:
+          $ref: '#/definitions/internal_handler_session.MentionedItemRequest'
+        type: array
+      query:
+        type: string
+      steer_id:
+        type: string
     required:
     - query
     type: object
@@ -9881,6 +9965,46 @@ paths:
       summary: 手工创建知识
       tags:
       - 知识管理
+  /knowledge-bases/{id}/knowledge/pre-chunked:
+    post:
+      consumes:
+      - application/json
+      description: 将一个上游已完成切分的文本块直接持久化并建立索引，不执行任何再次切分或内容增强
+      parameters:
+      - description: 知识库ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 预切分文本块
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/github_com_Tencent_WeKnora_internal_types.PreChunkedKnowledgePayload'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 幂等命中已有记录
+          schema:
+            additionalProperties: true
+            type: object
+        "201":
+          description: 创建结果
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: 请求参数错误
+          schema:
+            $ref: '#/definitions/github_com_Tencent_WeKnora_internal_errors.AppError'
+      security:
+      - Bearer: []
+      - ApiKeyAuth: []
+      summary: 写入预切分知识块
+      tags:
+      - 知识管理
   /knowledge-bases/{id}/knowledge/url:
     post:
       consumes:
@@ -11747,7 +11871,7 @@ paths:
     get:
       consumes:
       - application/json
-      description: 获取当前空间的所有MCP服务
+      description: 获取当前空间的所有MCP服务（含已保存工具目录数量）
       produces:
       - application/json
       responses:
@@ -12000,7 +12124,8 @@ paths:
     post:
       consumes:
       - application/json
-      description: 显式连接上游并原子替换完整目录。OAuth 服务写入当前用户的快照，Viewer 及以上可调用；静态认证写入租户共享快照，需要 Admin。
+      description: 显式连接上游并原子替换完整目录。OAuth 服务写入当前用户的快照，Viewer 及以上可调用；静态认证写入租户共享快照，需要
+        Admin。
       parameters:
       - description: MCP服务ID
         in: path
@@ -14791,6 +14916,73 @@ paths:
       summary: 取消置顶会话
       tags:
       - 会话
+  /sessions/{id}/steer:
+    get:
+      description: 刷新页面后用来恢复输入框上方的队列。没有正在运行的 turn 时返回空列表。
+      parameters:
+      - description: 会话 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/github_com_Tencent_WeKnora_internal_errors.AppError'
+        "503":
+          description: 活 turn 查询失败，可重试
+          schema:
+            $ref: '#/definitions/github_com_Tencent_WeKnora_internal_errors.AppError'
+      security:
+      - Bearer: []
+      - ApiKeyAuth: []
+      summary: 列出当前运行中尚未消费的排队消息
+      tags:
+      - 问答
+  /sessions/{id}/steer/{steer_id}:
+    delete:
+      description: 从当前运行的排队列表里去掉一条，不再注入也不再作为 follow-up 发出。
+      parameters:
+      - description: 会话 ID
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: 排队消息 ID
+        in: path
+        name: steer_id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/github_com_Tencent_WeKnora_internal_errors.AppError'
+        "503":
+          description: 活 turn 查询失败，可重试
+          schema:
+            $ref: '#/definitions/github_com_Tencent_WeKnora_internal_errors.AppError'
+      security:
+      - Bearer: []
+      - ApiKeyAuth: []
+      summary: 删除一条排队中的消息
+      tags:
+      - 问答
   /sessions/{session_id}/artifacts:
     get:
       description: 返回本会话中所有 assistant 消息产生的技能产物元数据（不含 URL）
@@ -14916,6 +15108,89 @@ paths:
       summary: 置顶会话
       tags:
       - 会话
+  /sessions/{session_id}/steer:
+    post:
+      consumes:
+      - application/json
+      description: 向运行中的 agent turn 追加用户消息（after 排队 / inject 注入）。无活 turn 时返回 new_run。
+      parameters:
+      - description: 会话 ID
+        in: path
+        name: session_id
+        required: true
+        type: string
+      - description: 追加消息
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/internal_handler_session.SteerMessageRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: queued | new_run
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: 请求参数错误
+          schema:
+            $ref: '#/definitions/github_com_Tencent_WeKnora_internal_errors.AppError'
+        "404":
+          description: 会话不存在
+          schema:
+            $ref: '#/definitions/github_com_Tencent_WeKnora_internal_errors.AppError'
+        "503":
+          description: 活 turn 查询失败，可重试
+          schema:
+            $ref: '#/definitions/github_com_Tencent_WeKnora_internal_errors.AppError'
+      security:
+      - Bearer: []
+      - ApiKeyAuth: []
+      summary: 向运行中的对话追加消息
+      tags:
+      - 问答
+  /sessions/{session_id}/steer/{steer_id}/inject:
+    post:
+      description: 把一条 delivery=after 的排队消息改为 inject，运行中的 agent 会在下一轮边界读到它。
+      parameters:
+      - description: 会话 ID
+        in: path
+        name: session_id
+        required: true
+        type: string
+      - description: 排队消息 ID
+        in: path
+        name: steer_id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: queued | new_run
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/github_com_Tencent_WeKnora_internal_errors.AppError'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/github_com_Tencent_WeKnora_internal_errors.AppError'
+        "503":
+          description: 活 turn 查询失败，可重试
+          schema:
+            $ref: '#/definitions/github_com_Tencent_WeKnora_internal_errors.AppError'
+      security:
+      - Bearer: []
+      - ApiKeyAuth: []
+      summary: 将排队消息改为立即注入
+      tags:
+      - 问答
   /sessions/{session_id}/stop:
     post:
       consumes:

@@ -494,6 +494,35 @@ func buildBoundComposite(t *testing.T, svc interfaces.RetrieveEngineService) *re
 	return composite
 }
 
+func TestResolveStoreGroupsRejectsChunkIDsForNonPostgres(t *testing.T) {
+	const storeID = "00000000-0000-0000-0000-000000000001"
+	engine := &fakeRetrieveEngineService{
+		engineType: types.ElasticsearchRetrieverEngineType,
+		support:    []types.RetrieverType{types.VectorRetrieverType},
+	}
+	svc := &knowledgeBaseService{
+		retrieveEngine: &fakeFanoutRegistry{
+			byStore: map[string]interfaces.RetrieveEngineService{storeID: engine},
+		},
+		ownership: &fakeOwnership{owned: map[string]uint64{storeID: 1}},
+	}
+	sid := storeID
+	kb := &types.KnowledgeBase{ID: "kb-1", TenantID: 1, VectorStoreID: &sid}
+
+	_, err := svc.resolveStoreGroups(
+		context.Background(),
+		kb,
+		[]*types.KnowledgeBase{kb},
+		types.SearchParams{ChunkIDs: []string{"chunk-1"}},
+		5,
+	)
+
+	appErr, ok := apperrors.IsAppError(err)
+	require.True(t, ok, "expected typed bad request, got %T: %v", err, err)
+	assert.Equal(t, apperrors.ErrBadRequest, appErr.Code)
+	assert.Contains(t, appErr.Message, "PostgreSQL")
+}
+
 func vectorParams(query string) []types.RetrieveParams {
 	return []types.RetrieveParams{{
 		Query:         query,

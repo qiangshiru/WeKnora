@@ -126,6 +126,10 @@ func (s *knowledgeBaseService) resolveStoreGroups(
 		if err != nil {
 			return nil, classifyFactoryError(ctx, err, key.tenantID, key.storeID)
 		}
+		if len(params.ChunkIDs) > 0 && !engine.UsesOnlyEngineType(types.PostgresRetrieverEngineType) {
+			return nil, apperrors.NewBadRequestError(
+				"chunk_ids filtering is supported only by the PostgreSQL retriever")
+		}
 		baseParams, err := s.buildRetrievalParams(
 			ctx, engine, primary, groupKBs, params, matchCount)
 		if err != nil {

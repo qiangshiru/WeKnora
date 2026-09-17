@@ -100,6 +100,20 @@ func (c *CompositeRetrieveEngine) SupportRetriever(r types.RetrieverType) bool {
 	return false
 }
 
+// UsesOnlyEngineType reports whether every configured retrieval engine has the
+// requested type. An empty composite returns false.
+func (c *CompositeRetrieveEngine) UsesOnlyEngineType(engineType types.RetrieverEngineType) bool {
+	if len(c.engineInfos) == 0 {
+		return false
+	}
+	for _, engineInfo := range c.engineInfos {
+		if engineInfo == nil || engineInfo.retrieveEngine.EngineType() != engineType {
+			return false
+		}
+	}
+	return true
+}
+
 // BatchUpdateChunkEnabledStatus updates the enabled status of chunks in batch
 func (c *CompositeRetrieveEngine) BatchUpdateChunkEnabledStatus(
 	ctx context.Context,
